@@ -1,6 +1,6 @@
 <template>
   <div>
-    <h1>Welcome to Video join it and funit!</h1>
+    <h1>Welcome to Video join it and funit! {{ roomId }} </h1>
     <div id="buttons">
       <button id="cameraBtn" @click="requestMediaAccess">
 
@@ -10,14 +10,15 @@
 
         <span class="mdc-button__label" @click="createRoom">Créer un chatroom</span>
       </button>
-      <button id="joinBtn">
+      <button id="joinBtn" @click="joinRoom">
 
         <span class="mdc-button__label">Rejoindre chatroom</span>
       </button>
       <button id="hangupBtn">
 
-        <span class="mdc-button__label" @click="saveDataToDB">Raccrocher</span>
+        <span class="mdc-button__label" @click="closeConnection">Raccrocher</span>
       </button>
+      <input type="text" name="joinId" id="joinId" v-model="joinId">
     </div>
     <div>
       <span id="currentRoom"></span>
@@ -36,9 +37,18 @@ import { addDoc, collection } from 'firebase/firestore'
 
 export default {
   name: 'IndexPage',
+  data() {
+    return {
+      joinId: "",
+    }
+  },
   computed: {
     local() {
       return this.$store.state.localStream;
+    },
+
+    roomId() {
+      return this.$store.state.roomId;
     },
 
     remote() {
@@ -48,21 +58,21 @@ export default {
   },
 
   methods: {
-    async saveDataToDB() {
-      console.log("what happen", db)
 
-      const docRef = await addDoc(collection(db, "cities"), {
-        name: "Tokyo",
-        country: "Japan"
-      });
-      console.log("Document written with ID: ", docRef.id);
+    joinRoom() {
+      this.$store.dispatch('joinRoomById', this.joinId);
     },
+
     requestMediaAccess() {
       this.$store.dispatch('openUserMedia');
     },
 
     createRoom() {
       this.$store.dispatch('createRoom');
+    },
+
+    closeConnection() {
+      this.$store.dispatch('hangUp');
     },
     ...mapMutations({
 

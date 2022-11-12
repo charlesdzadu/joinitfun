@@ -1,5 +1,5 @@
 import { db } from '~/plugins/firebase.js'
-import { collection, doc, setDoc, addDoc } from "firebase/firestore"
+import { collection, doc, setDoc, addDoc, onSnapshot, getDoc, getDocs, deleteDoc, updateDoc } from "firebase/firestore"
 
 
 const configuration = {
@@ -48,6 +48,19 @@ export const mutations = {
 
     },
 
+    updateRoomId(state, id) {
+        state.roomId = id;
+    },
+
+    initializeStream(state) {
+        state.localStream = null;
+        state.remoteStream = null;
+    },
+
+    initializeRoomId(state) {
+        state.roomId = null;
+    },
+
 
     registerPeerConnectionListeners(state) {
         state.peerConnection.addEventListener('icegatheringstatechange', () => {
@@ -88,30 +101,13 @@ export const actions = {
 
     async createRoom({ commit, state }) {
 
-        
-
-
         console.log('Create PeerConnection with configuration: ', configuration);
-
 
         commit('updatePeerConnection', new RTCPeerConnection(configuration))
         commit('registerPeerConnectionListeners')
 
         state.localStream.getTracks().forEach(track => {
             state.peerConnection.addTrack(track, state.localStream);
-        });
-
-
-        // Code for collecting ICE candidates below
-        //TODO enregistrer dans firestore caller candidate
-        // const callerCandidatesCollection = roomRef.collection('callerCandidates');
-        state.peerConnection.addEventListener('icecandidate', event => {
-            if (!event.candidate) {
-                console.log('Got final candidate!');
-                return;
-            }
-            console.log('Got candidate: ', event.candidate);
-            // callerCandidatesCollection.add(event.candidate.toJSON());
         });
 
 
@@ -125,21 +121,32 @@ export const actions = {
                 sdp: offer.sdp,
             },
         };
-        try {
-            console.log("room ref  création d'offre", roomWithOffer)
 
-            addDoc(collection(db, "rooms"), roomWithOffer).then((data) => {
-                console.log("what happens")
-                console.log("la donner ", data)
-            })
+        console.log("room ref  création d'offre", roomWithOffer)
+        let roomRef = await addDoc(collection(db, "rooms"), roomWithOffer)
 
+        commit('updateRoomId', roomRef.id)
 
-        } catch (error) {
-            console.log("il ya une error", error)
-
-        }
-        state.roomId = roomRef.id;
         console.log(`New room created with SDP offer. Room ID: ${roomRef.id}`);
+
+
+
+        // Code for collecting ICE candidates below
+
+        const callerCandidatesCollectionRef = collection(db, "rooms", roomRef.id, "callerCandidates")
+
+        state.peerConnection.addEventListener('icecandidate', async (event) => {
+            if (!event.candidate) {
+                console.log('Got final candidate!');
+                return;
+            }
+            console.log('Got candidate: ', event.candidate);
+            await addDoc(callerCandidatesCollectionRef, event.candidate.toJSON())
+            // callerCandidatesCollection.add(event.candidate.toJSON());
+        });
+
+
+
 
 
         //Ecouter le track sur la connexion
@@ -153,8 +160,9 @@ export const actions = {
 
 
         // Ecouter les données dans Firebase pour voir si quelqu'un répond à l'appel
-        roomRef.onSnapshot(async snapshot => {
-            const data = snapshot.data();
+        const unListenRoom = onSnapshot(doc(db, "rooms", roomRef.id), async (doc) => {
+            const data = doc.data();
+            console.log("Current data: ", data);
             if (!state.peerConnection.currentRemoteDescription && data && data.answer) {
                 console.log('Got remote description: ', data.answer);
                 const rtcSessionDescription = new RTCSessionDescription(data.answer);
@@ -164,44 +172,50 @@ export const actions = {
 
 
         // Ecouter la collection sur calle Candidate
-        roomRef.collection('calleeCandidates').onSnapshot(snapshot => {
-            snapshot.docChanges().forEach(async change => {
+        const unListenCalleCandidate = onSnapshot(callerCandidatesCollectionRef, async (snapshot) => {
+            snapshot.forEach(async change => {
                 if (change.type === 'added') {
                     let data = change.doc.data();
                     console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
                     await state.peerConnection.addIceCandidate(new RTCIceCandidate(data));
                 }
             });
-        });
+        })
+
 
 
     },
 
-    async joinRoomById({ state }) {
-        let enterRoomId = "";
-        const db = firebase.firestore();
-        const roomRef = db.collection('rooms').doc(`${enterRoomId}`);
-        const roomSnapshot = await roomRef.get();
-        console.log('Got room:', roomSnapshot.exists);
+    async joinRoomById({ commit, state }, enterRoomId) {
 
-        if (roomSnapshot.exists) {
+        console.log(enterRoomId)
+        const roomSnapshot = await getDoc(doc(db, "rooms", enterRoomId));
+        console.log('Got room:', roomSnapshot.exists());
+
+        if (roomSnapshot.exists()) {
+
             console.log('Create PeerConnection with configuration: ', configuration);
-            state.peerConnection = new RTCPeerConnection(configuration);
-            registerPeerConnectionListeners();
+
+            commit('updatePeerConnection', new RTCPeerConnection(configuration))
+            commit('registerPeerConnectionListeners')
+
+            console.log('local stream ', state.localStream)
+
             state.localStream.getTracks().forEach(track => {
-                state.peerConnection.addTrack(track, localStream);
+                state.peerConnection.addTrack(track, state.localStream);
             });
 
 
             // Code for collecting ICE candidates below
-            const calleeCandidatesCollection = roomRef.collection('calleeCandidates');
-            state.peerConnection.addEventListener('icecandidate', event => {
+            const calleeCandidatesCollection = collection(db, "rooms", enterRoomId, "calleeCandidates");
+
+            state.peerConnection.addEventListener('icecandidate', async (event) => {
                 if (!event.candidate) {
                     console.log('Got final candidate!');
                     return;
                 }
                 console.log('Got candidate: ', event.candidate);
-                calleeCandidatesCollection.add(event.candidate.toJSON());
+                await addDoc(calleeCandidatesCollection, event.candidate.toJSON())
             });
 
 
@@ -229,45 +243,30 @@ export const actions = {
                     sdp: answer.sdp,
                 },
             };
-            await roomRef.update(roomWithAnswer);
 
-            // Listening for remote ICE candidates below
-            roomRef.collection('callerCandidates').onSnapshot(snapshot => {
-                snapshot.docChanges().forEach(async change => {
+            await updateDoc(doc(db, "rooms", enterRoomId), roomWithAnswer)
+
+
+            const unListenCalleCandidate = onSnapshot(calleeCandidatesCollection, async (snapshot) => {
+                snapshot.forEach(async change => {
                     if (change.type === 'added') {
                         let data = change.doc.data();
                         console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
                         await state.peerConnection.addIceCandidate(new RTCIceCandidate(data));
                     }
                 });
-            });
+            })
+
+
+            console.log("tout exécuté")
         }
     },
 
 
-    async registerPeerConnectionListeners({ state }) {
-        state.peerConnection.addEventListener('icegatheringstatechange', () => {
-            console.log(
-                `ICE gathering state changed: ${state.peerConnection.iceGatheringState}`);
-        });
+    async hangUp({ commit, state }) {
 
-        state.peerConnection.addEventListener('connectionstatechange', () => {
-            console.log(`Connection state change: ${state.peerConnection.connectionState}`);
-        });
-
-        state.peerConnection.addEventListener('signalingstatechange', () => {
-            console.log(`Signaling state change: ${state.peerConnection.signalingState}`);
-        });
-
-        state.peerConnection.addEventListener('iceconnectionstatechange ', () => {
-            console.log(
-                `ICE connection state change: ${state.peerConnection.iceConnectionState}`);
-        });
-    },
-
-
-    async hangUp({ state }) {
         state.localStream.getTracks().forEach(track => track.stop())
+
         if (state.remoteStream) {
             state.remoteStream.getTracks().forEach(track => track.stop())
         }
@@ -276,22 +275,24 @@ export const actions = {
             state.peerConnection.close()
         }
 
-        state.localStream = null;
-        state.remoteStream = null;
+        commit('initializeStream')
 
         if (state.roomId) {
-            const db = firebase.firestore();
-            const roomRef = db.collection('rooms').doc(roomId);
-            const calleeCandidates = await roomRef.collection('calleeCandidates').get();
+
+            const calleeCandidates = await getDocs(collection(db, "rooms", state.roomId, "calleeCandidates"))
             calleeCandidates.forEach(async candidate => {
-                await candidate.ref.delete();
+                await deleteDoc(doc(db, "rooms", state.roomId, "calleeCandidates", candidate.id))
             });
 
-            const callerCandidates = await roomRef.collection('callerCandidates').get();
+
+            const callerCandidates = await getDocs(collection(db, "rooms", state.roomId, "callerCandidates"))
             callerCandidates.forEach(async candidate => {
-                await candidate.ref.delete();
+                await deleteDoc(doc(db, "rooms", state.roomId, "callerCandidates", candidate.id))
             });
-            await roomRef.delete();
+
+            await deleteDoc(doc(db, "rooms", state.roomId))
+
+            commit('initializeRoomId')
 
         }
 
